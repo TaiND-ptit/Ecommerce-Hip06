@@ -4,6 +4,8 @@ const {
 } = require("../middlewares/jwt");
 const User = require("../models/user");
 const asyncHandler = require("express-async-handler");
+const jwt = require("jsonwebtoken");
+const sendMail = require("../ultils/sendMail");
 
 const register = asyncHandler(async (req, res) => {
   const { email, password, firstname, lastname } = req.body;
@@ -36,7 +38,7 @@ const login = asyncHandler(async (req, res) => {
 
   const response = await User.findOne({ email });
   if (response && (await response.isCorrectPassword(password))) {
-    const { password, role, ...userData } = response.toObject();
+    const { password, role, refreshToken, ...userData } = response.toObject();
     const accessToken = generateAccessToken(response._id, role);
     const newRefreshToken = generateRefreshToken(response._id);
     // Lưu refresh token vào database
@@ -69,16 +71,130 @@ const getCurrent = asyncHandler(async (req, res) => {
   });
 });
 
+const refreshAccessToken = asyncHandler(async (req, res) => {
+  // Lấy token từ cookies
+  const cookie = req.cookies;
+  // Check xem có token hay không
+  if (!cookie && !cookie.refreshToken)
+    throw new Error("No refresh token in cookies");
+  // Check token có hợp lệ hay không
+  const rs = await jwt.verify(cookie.refreshToken, process.env.JWT_SECRET);
+  const response = await User.findOne({
+    _id: rs._id,
+    refreshToken: cookie.refreshToken,
+  });
+  return res.status(200).json({
+    success: response ? true : false,
+    newAccessToken: response
+      ? generateAccessToken(response._id, response.role)
+      : "Refresh token not matched",
+  });
+});
+
+const logout = asyncHandler(async (req, res) => {
+  // Lấy token từ cookies
+  const cookie = req.cookies;
+  // Check xem có token hay không
+  if (!cookie && !cookie.refreshToken)
+    throw new Error("No refresh token in cookies");
+  // Xóa refresh token ở db
+  await User.findOneAndUpdate(
+    { refreshToken: cookie.refreshToken },
+    { refreshToken: "" },
+    { new: true }
+  );
+  // Xóa refresh token ở cookie trình duyệt
+  res.clearCookie("refreshToken", {
+    httpOnly: true,
+    secure: true,
+  });
+  return res.status(200).json({
+    success: true,
+    mes: "Logout is done",
+  });
+});
+
+// Client gửi email
+// Server check email có hợp lệ hay không => Gửi mail + kèm theo link (password change token)
+// Client check mail => click link
+// Client gửi api kèm token
+// Check token có giống với token mà server gửi mail hay không
+// Change password
+
+const forgotPassword = asyncHandler(async (req, res) => {
+  const { email } = req.query;
+  if (!email) throw new Error("Missing email");
+  const user = await User.findOne({ email });
+  if (!user) throw new Error("User not found");
+  const resetToken = user.createPasswordChangedToken();
+  await user.save();
+  const html = `Xin vui lòng click vào link dưới đây để thay đổi mật khẩu của bạn.Link này sẽ hết hạn sau 15 phút kể từ bây giờ. <a href=${process.env.URL_SERVER}/api/user/reset-password/${resetToken}>Click here</a>`;
+
+  const data = {
+    email,
+    html,
+  };
+  const rs = await sendMail(data);
+  return res.status(200).json({
+    success: true,
+    rs,
+  });
+});
+
+const getUsers = asyncHandler(async (req, res) => {
+  const response = await User.find().select("-refreshToken -password -role");
+  return res.status(200).json({
+    success: response ? true : false,
+    dataUser: response,
+  });
+});
+
+const deleteUser = asyncHandler(async (req, res) => {
+  const { _id } = req.query;
+  if (!_id) throw new Error("Missing input");
+  const response = await User.findByIdAndDelete(_id);
+  return res.status(200).json({
+    success: response ? true : false,
+    dataUser: response ? "Delete is done" : "Delete is false",
+  });
+});
+
+const updateUser = asyncHandler(async (req, res) => {
+  const { _id } = req.user;
+  if (!_id || Object.keys(req.body).length === 0)
+    throw new Error("Missing input");
+  const response = await User.findByIdAndUpdate(_id, req.body, {
+    new: true,
+  }).select("-password -role");
+  return res.status(200).json({
+    success: response ? true : false,
+    dataUser: response ? "Update is done" : "Update is false",
+  });
+});
+
+const updateUserByAdmin = asyncHandler(async (req, res) => {
+  const { uid } = req.params;
+  if (Object.keys(req.body).length === 0)
+    throw new Error("Missing input");
+  const response = await User.findByIdAndUpdate(uid, req.body, {
+    new: true,
+  }).select("-password -role");
+  return res.status(200).json({
+    success: response ? true : false,
+    dataUser: response ? "Update is done" : "Update is false",
+  });
+});
+
 module.exports = {
   register,
   login,
   getCurrent,
-  //   refreshAccessToken,
-  //   logout,
-  //   forgotPassword,
-  //   resetPassword,
-  //   getUsers,
-  //   deleteUser,
-  //   updateUser,
-  //   updateUserByAdmin,
+  refreshAccessToken,
+  logout,
+  // forgotPassword,
+  // resetPassword,
+  getUsers,
+  deleteUser,
+  updateUser,
+  updateUserByAdmin,
 };
